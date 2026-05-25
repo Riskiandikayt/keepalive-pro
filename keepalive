@@ -1,0 +1,436 @@
+#!/data/data/com.termux/files/usr/bin/bash
+# ============================================================
+#  KEEPALIVE CLI — Command Line Interface
+#  Usage: keepalive <command> [options]
+# ============================================================
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+CONFIG="$SCRIPT_DIR/config.sh"
+MAIN="$SCRIPT_DIR/main.sh"
+PID_FILE="$SCRIPT_DIR/.keepalive.pid"
+LOG_FILE="$SCRIPT_DIR/logs.txt"
+
+# Warna
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+CYAN='\033[0;36m'
+MAGENTA='\033[0;35m'
+WHITE='\033[1;37m'
+DIM='\033[2m'
+BOLD='\033[1m'
+RESET='\033[0m'
+
+# ── Banner ──────────────────────────────────────────────────
+banner() {
+    echo -e "${BOLD}${CYAN}"
+    echo "  ██╗  ██╗███████╗███████╗██████╗  █████╗ ██╗     ██╗██╗   ██╗███████╗"
+    echo "  ██║ ██╔╝██╔════╝██╔════╝██╔══██╗██╔══██╗██║     ██║██║   ██║██╔════╝"
+    echo "  █████╔╝ █████╗  █████╗  ██████╔╝███████║██║     ██║██║   ██║█████╗  "
+    echo "  ██╔═██╗ ██╔══╝  ██╔══╝  ██╔═══╝ ██╔══██║██║     ██║╚██╗ ██╔╝██╔══╝  "
+    echo "  ██║  ██╗███████╗███████╗██║     ██║  ██║███████╗██║ ╚████╔╝ ███████╗"
+    echo "  ╚═╝  ╚═╝╚══════╝╚══════╝╚═╝     ╚═╝  ╚═╝╚══════╝╚═╝  ╚═══╝  ╚══════╝"
+    echo -e "${DIM}  Website Monitor 24/7 — Termux Android${RESET}"
+    echo ""
+}
+
+# ── Help ────────────────────────────────────────────────────
+show_help() {
+    banner
+    echo -e "${BOLD}${WHITE}PERINTAH:${RESET}"
+    echo ""
+    echo -e "  ${GREEN}keepalive start${RESET}                    Jalankan di background"
+    echo -e "  ${GREEN}keepalive stop${RESET}                     Hentikan script"
+    echo -e "  ${GREEN}keepalive restart${RESET}                  Restart script"
+    echo -e "  ${GREEN}keepalive status${RESET}                   Lihat status & website"
+    echo -e "  ${GREEN}keepalive log${RESET}                      Lihat log terbaru"
+    echo -e "  ${GREEN}keepalive log -n 50${RESET}                Lihat 50 baris log terakhir"
+    echo -e "  ${GREEN}keepalive log clear${RESET}                Hapus semua log"
+    echo ""
+    echo -e "${BOLD}${WHITE}KELOLA WEBSITE:${RESET}"
+    echo ""
+    echo -e "  ${CYAN}keepalive add <url>${RESET}                Tambah website"
+    echo -e "  ${CYAN}keepalive remove <url>${RESET}             Hapus website"
+    echo -e "  ${CYAN}keepalive list${RESET}                     Lihat semua website"
+    echo -e "  ${CYAN}keepalive ping <url>${RESET}               Ping website sekarang"
+    echo ""
+    echo -e "${BOLD}${WHITE}KONFIGURASI:${RESET}"
+    echo ""
+    echo -e "  ${YELLOW}keepalive set interval <detik>${RESET}    Set interval ping"
+    echo -e "  ${YELLOW}keepalive set timeout <detik>${RESET}     Set timeout request"
+    echo -e "  ${YELLOW}keepalive set method <GET|HEAD>${RESET}   Set metode request"
+    echo -e "  ${YELLOW}keepalive config${RESET}                  Lihat semua config"
+    echo ""
+    echo -e "${BOLD}${WHITE}PRESET PLATFORM:${RESET}"
+    echo ""
+    echo -e "  ${MAGENTA}keepalive preset replit${RESET}            Interval 4 menit"
+    echo -e "  ${MAGENTA}keepalive preset render${RESET}            Interval 14 menit"
+    echo -e "  ${MAGENTA}keepalive preset railway${RESET}           Interval 25 menit"
+    echo -e "  ${MAGENTA}keepalive preset glitch${RESET}            Interval 4 menit"
+    echo ""
+    echo -e "  ${DIM}Contoh: keepalive add https://myapp.replit.dev${RESET}"
+    echo -e "  ${DIM}        keepalive preset replit${RESET}"
+    echo -e "  ${DIM}        keepalive start${RESET}
+
+  ${BOLD}${WHITE}AUTO BOOT:${RESET}
+
+  ${RED}keepalive install-boot${RESET}             Auto start saat HP restart"
+    echo ""
+}
+
+# ── Baca config ─────────────────────────────────────────────
+get_config_value() {
+    local key="$1"
+    grep "^${key}=" "$CONFIG" | head -1 | cut -d'=' -f2- | tr -d '"' | tr -d "'"
+}
+
+get_websites() {
+    # Extract WEBSITES array dari config
+    awk '/^WEBSITES=\(/{flag=1; next} /^\)/{flag=0} flag{gsub(/[" \t#].*$/,""); if($0!="") print $0}' "$CONFIG"
+}
+
+# ── Set config value ─────────────────────────────────────────
+set_config_value() {
+    local key="$1"
+    local value="$2"
+    sed -i "s|^${key}=.*|${key}=${value}|" "$CONFIG"
+}
+
+# ── Tambah website ───────────────────────────────────────────
+add_website() {
+    local url="$1"
+    if [[ -z "$url" ]]; then
+        echo -e "${RED}✗ URL tidak boleh kosong.${RESET}"
+        echo -e "  Contoh: ${CYAN}keepalive add https://myapp.replit.dev${RESET}"
+        exit 1
+    fi
+    # Cek sudah ada
+    if grep -q "\"$url\"" "$CONFIG"; then
+        echo -e "${YELLOW}⚠  URL sudah ada di daftar.${RESET}"
+        exit 0
+    fi
+    # Tambah sebelum penutup )
+    sed -i "/^)/i\\    \"$url\"" "$CONFIG"
+    echo -e "${GREEN}✓ Website ditambahkan: ${CYAN}$url${RESET}"
+}
+
+# ── Hapus website ────────────────────────────────────────────
+remove_website() {
+    local url="$1"
+    if [[ -z "$url" ]]; then
+        echo -e "${RED}✗ URL tidak boleh kosong.${RESET}"
+        exit 1
+    fi
+    if ! grep -q "\"$url\"" "$CONFIG"; then
+        echo -e "${YELLOW}⚠  URL tidak ditemukan di daftar.${RESET}"
+        exit 0
+    fi
+    sed -i "/\"$url\"/d" "$CONFIG"
+    echo -e "${GREEN}✓ Website dihapus: ${CYAN}$url${RESET}"
+}
+
+# ── List websites ────────────────────────────────────────────
+list_websites() {
+    echo -e "${BOLD}${WHITE}Daftar Website:${RESET}"
+    echo ""
+    local i=1
+    while IFS= read -r url; do
+        [[ -z "$url" ]] && continue
+        echo -e "  ${BOLD}[$i]${RESET} ${CYAN}$url${RESET}"
+        (( i++ ))
+    done < <(get_websites)
+    if [[ $i -eq 1 ]]; then
+        echo -e "  ${DIM}Belum ada website. Tambah dengan: keepalive add <url>${RESET}"
+    fi
+    echo ""
+}
+
+# ── Ping website ─────────────────────────────────────────────
+ping_now() {
+    local url="$1"
+    if [[ -z "$url" ]]; then
+        # Ping semua
+        echo -e "${BOLD}${WHITE}Ping semua website...${RESET}"
+        echo ""
+        while IFS= read -r u; do
+            [[ -z "$u" ]] && continue
+            echo -ne "  ${CYAN}$u${RESET} → "
+            local start end elapsed code
+            start=$(date +%s%3N)
+            code=$(curl -s -o /dev/null -w "%{http_code}" --max-time 10 "$u" 2>/dev/null)
+            end=$(date +%s%3N)
+            elapsed=$(( end - start ))
+            if [[ "$code" =~ ^2 ]]; then
+                echo -e "${GREEN}HTTP $code ✓${RESET} ${DIM}(${elapsed}ms)${RESET}"
+            elif [[ "$code" =~ ^3 ]]; then
+                echo -e "${YELLOW}HTTP $code ↪${RESET} ${DIM}(${elapsed}ms)${RESET}"
+            else
+                echo -e "${RED}HTTP $code ✗${RESET} ${DIM}(${elapsed}ms)${RESET}"
+            fi
+        done < <(get_websites)
+    else
+        echo -ne "  Ping ${CYAN}$url${RESET} → "
+        local start end elapsed code
+        start=$(date +%s%3N)
+        code=$(curl -s -o /dev/null -w "%{http_code}" --max-time 10 "$url" 2>/dev/null)
+        end=$(date +%s%3N)
+        elapsed=$(( end - start ))
+        if [[ "$code" =~ ^2 ]]; then
+            echo -e "${GREEN}HTTP $code ✓${RESET} ${DIM}(${elapsed}ms)${RESET}"
+        else
+            echo -e "${RED}HTTP $code ✗${RESET} ${DIM}(${elapsed}ms)${RESET}"
+        fi
+    fi
+    echo ""
+}
+
+# ── Status ───────────────────────────────────────────────────
+show_status() {
+    echo -e "${BOLD}${CYAN}╔══════════════════════════════════════════════╗${RESET}"
+    echo -e "${BOLD}${CYAN}║         📊  KEEPALIVE STATUS                 ║${RESET}"
+    echo -e "${BOLD}${CYAN}╚══════════════════════════════════════════════╝${RESET}"
+    echo ""
+
+    # Status proses
+    if [[ -f "$PID_FILE" ]]; then
+        local pid
+        pid=$(cat "$PID_FILE")
+        if kill -0 "$pid" 2>/dev/null; then
+            echo -e "  Script    : ${GREEN}● RUNNING${RESET} ${DIM}(PID: $pid)${RESET}"
+        else
+            echo -e "  Script    : ${RED}● STOPPED${RESET} ${DIM}(PID file ada tapi process mati)${RESET}"
+        fi
+    else
+        echo -e "  Script    : ${RED}● STOPPED${RESET}"
+    fi
+
+    # Internet
+    echo -ne "  Internet  : "
+    if curl -s --max-time 4 --head "https://connectivitycheck.gstatic.com/generate_204" \
+            -o /dev/null -w "%{http_code}" 2>/dev/null | grep -q "204"; then
+        echo -e "${GREEN}● ONLINE${RESET}"
+    else
+        echo -e "${RED}● OFFLINE${RESET}"
+    fi
+
+    # Config
+    local interval timeout method
+    interval=$(get_config_value "REFRESH_INTERVAL")
+    timeout=$(get_config_value "REQUEST_TIMEOUT")
+    method=$(get_config_value "REQUEST_METHOD")
+    echo -e "  Interval  : ${YELLOW}${interval}s${RESET} ${DIM}($(( interval / 60 ))m $(( interval % 60 ))s)${RESET}"
+    echo -e "  Timeout   : ${YELLOW}${timeout}s${RESET}"
+    echo -e "  Method    : ${YELLOW}${method}${RESET}"
+    echo ""
+
+    # Website status
+    echo -e "  ${BOLD}Website:${RESET}"
+    local i=1
+    while IFS= read -r url; do
+        [[ -z "$url" ]] && continue
+        local short="${url:0:50}"
+        echo -ne "  ${BOLD}[$i]${RESET} ${CYAN}$short${RESET} → "
+        local start end elapsed code
+        start=$(date +%s%3N)
+        code=$(curl -s -o /dev/null -w "%{http_code}" --max-time 10 "$url" 2>/dev/null)
+        end=$(date +%s%3N)
+        elapsed=$(( end - start ))
+        if [[ "$code" =~ ^2 ]]; then
+            echo -e "${GREEN}HTTP $code ✓${RESET} ${DIM}(${elapsed}ms)${RESET}"
+        elif [[ "$code" =~ ^3 ]]; then
+            echo -e "${YELLOW}HTTP $code ↪${RESET} ${DIM}(${elapsed}ms)${RESET}"
+        else
+            echo -e "${RED}HTTP $code ✗${RESET} ${DIM}(${elapsed}ms)${RESET}"
+        fi
+        (( i++ ))
+    done < <(get_websites)
+
+    echo ""
+    # Log terbaru
+    if [[ -f "$LOG_FILE" ]] && [[ -s "$LOG_FILE" ]]; then
+        echo -e "  ${BOLD}Log Terbaru:${RESET}"
+        tail -n 3 "$LOG_FILE" | while IFS= read -r line; do
+            echo -e "  ${DIM}$line${RESET}"
+        done
+    fi
+    echo ""
+}
+
+# ── Log ──────────────────────────────────────────────────────
+show_log() {
+    local n="${1:-20}"
+    local action="$2"
+
+    if [[ "$n" == "clear" ]]; then
+        > "$LOG_FILE"
+        echo -e "${GREEN}✓ Log dihapus.${RESET}"
+        return
+    fi
+
+    if [[ "$action" == "-n" ]]; then
+        n="$2"
+    fi
+
+    if [[ ! -f "$LOG_FILE" ]] || [[ ! -s "$LOG_FILE" ]]; then
+        echo -e "${DIM}Log kosong.${RESET}"
+        return
+    fi
+
+    local total
+    total=$(wc -l < "$LOG_FILE")
+    echo -e "${BOLD}${WHITE}Log (${n} baris terakhir dari ${total}):${RESET}"
+    echo ""
+    tail -n "$n" "$LOG_FILE" | while IFS= read -r line; do
+        if [[ "$line" == *"[OK]"* ]]; then
+            echo -e "  ${GREEN}$line${RESET}"
+        elif [[ "$line" == *"[ERROR]"* ]]; then
+            echo -e "  ${RED}$line${RESET}"
+        elif [[ "$line" == *"[WARN]"* ]]; then
+            echo -e "  ${YELLOW}$line${RESET}"
+        else
+            echo -e "  ${DIM}$line${RESET}"
+        fi
+    done
+    echo ""
+}
+
+# ── Config ───────────────────────────────────────────────────
+show_config() {
+    echo -e "${BOLD}${WHITE}Konfigurasi Aktif:${RESET}"
+    echo ""
+    echo -e "  ${YELLOW}REFRESH_INTERVAL${RESET} = $(get_config_value REFRESH_INTERVAL)s"
+    echo -e "  ${YELLOW}REQUEST_TIMEOUT${RESET}  = $(get_config_value REQUEST_TIMEOUT)s"
+    echo -e "  ${YELLOW}REQUEST_METHOD${RESET}   = $(get_config_value REQUEST_METHOD)"
+    echo -e "  ${YELLOW}RETRY_WAIT${RESET}       = $(get_config_value RETRY_WAIT)s"
+    echo -e "  ${YELLOW}ENABLE_LOG${RESET}       = $(get_config_value ENABLE_LOG)"
+    echo -e "  ${YELLOW}ENABLE_NOTIF${RESET}     = $(get_config_value ENABLE_NOTIFICATION)"
+    echo ""
+    list_websites
+}
+
+# ── Preset platform ──────────────────────────────────────────
+set_preset() {
+    local platform="$1"
+    case "$platform" in
+        replit|glitch|koyeb)
+            set_config_value "REFRESH_INTERVAL" "240"
+            echo -e "${GREEN}✓ Preset ${BOLD}$platform${RESET}${GREEN} diterapkan — interval 4 menit (240s)${RESET}"
+            ;;
+        render|cyclic)
+            set_config_value "REFRESH_INTERVAL" "840"
+            echo -e "${GREEN}✓ Preset ${BOLD}$platform${RESET}${GREEN} diterapkan — interval 14 menit (840s)${RESET}"
+            ;;
+        railway)
+            set_config_value "REFRESH_INTERVAL" "1500"
+            echo -e "${GREEN}✓ Preset ${BOLD}$platform${RESET}${GREEN} diterapkan — interval 25 menit (1500s)${RESET}"
+            ;;
+        *)
+            echo -e "${RED}✗ Platform tidak dikenal: $platform${RESET}"
+            echo -e "  Platform tersedia: ${CYAN}replit, render, railway, glitch, koyeb, cyclic${RESET}"
+            exit 1
+            ;;
+    esac
+}
+
+# ── Start ────────────────────────────────────────────────────
+do_start() {
+    if [[ -f "$PID_FILE" ]]; then
+        local old_pid
+        old_pid=$(cat "$PID_FILE")
+        if kill -0 "$old_pid" 2>/dev/null; then
+            echo -e "${YELLOW}⚠  Script sudah berjalan (PID: $old_pid)${RESET}"
+            echo -e "   Gunakan: ${CYAN}keepalive restart${RESET}"
+            exit 1
+        else
+            rm -f "$PID_FILE"
+        fi
+    fi
+
+    chmod +x "$SCRIPT_DIR"/*.sh 2>/dev/null
+
+    (
+        while true; do
+            bash "$MAIN"
+            EXIT_CODE=$?
+            [[ "$EXIT_CODE" -eq 0 ]] && break
+            echo "⚠ Crash (exit $EXIT_CODE). Restart dalam 5 detik..."
+            sleep 5
+        done
+    ) &
+
+    local wpid=$!
+    echo "$wpid" > "$PID_FILE"
+    echo -e "${GREEN}✓ Keepalive berjalan di background ${DIM}(PID: $wpid)${RESET}"
+    echo -e "  ${DIM}keepalive status  → cek status${RESET}"
+    echo -e "  ${DIM}keepalive log     → lihat log${RESET}"
+    echo -e "  ${DIM}keepalive stop    → berhenti${RESET}"
+}
+
+# ── Stop ─────────────────────────────────────────────────────
+do_stop() {
+    if [[ ! -f "$PID_FILE" ]]; then
+        echo -e "${YELLOW}⚠  Script tidak sedang berjalan.${RESET}"
+        pkill -f "main.sh" 2>/dev/null
+        exit 0
+    fi
+    local pid
+    pid=$(cat "$PID_FILE")
+    if kill -0 "$pid" 2>/dev/null; then
+        kill -SIGTERM "$pid" 2>/dev/null
+        sleep 2
+        kill -0 "$pid" 2>/dev/null && kill -SIGKILL "$pid" 2>/dev/null
+        echo -e "${GREEN}✓ Script dihentikan.${RESET}"
+    else
+        echo -e "${YELLOW}⚠  Process sudah tidak ada.${RESET}"
+    fi
+    pkill -f "main.sh" 2>/dev/null
+    rm -f "$PID_FILE" "$SCRIPT_DIR/.keepalive.lock"
+}
+
+# ── Main CLI ─────────────────────────────────────────────────
+CMD="$1"
+shift
+
+case "$CMD" in
+    start)       do_start ;;
+    stop)        do_stop ;;
+    restart)     do_stop; sleep 1; do_start ;;
+    status)      show_status ;;
+    log)
+        if [[ "$1" == "-n" ]]; then
+            show_log "$2"
+        elif [[ "$1" == "clear" ]]; then
+            show_log "clear"
+        else
+            show_log "${1:-20}"
+        fi
+        ;;
+    add)         add_website "$1" ;;
+    remove|rm)   remove_website "$1" ;;
+    list|ls)     list_websites ;;
+    ping)        ping_now "$1" ;;
+    config)      show_config ;;
+    set)
+        case "$1" in
+            interval) set_config_value "REFRESH_INTERVAL" "$2"; echo -e "${GREEN}✓ Interval diubah ke ${BOLD}${2}s${RESET}" ;;
+            timeout)  set_config_value "REQUEST_TIMEOUT" "$2";  echo -e "${GREEN}✓ Timeout diubah ke ${BOLD}${2}s${RESET}" ;;
+            method)   set_config_value "REQUEST_METHOD" "\"$2\""; echo -e "${GREEN}✓ Method diubah ke ${BOLD}$2${RESET}" ;;
+            *) echo -e "${RED}✗ set apa? Pilihan: interval, timeout, method${RESET}" ;;
+        esac
+        ;;
+    preset)      set_preset "$1" ;;
+    install-boot)
+        BOOT_DIR="$HOME/.termux/boot"
+        mkdir -p "$BOOT_DIR"
+        cp "$SCRIPT_DIR/boot/keepalive-boot.sh" "$BOOT_DIR/keepalive-boot.sh"
+        chmod +x "$BOOT_DIR/keepalive-boot.sh"
+        echo -e "${GREEN}✓ Auto-boot terpasang!${RESET}"
+        echo -e "  ${DIM}Script akan otomatis start saat HP restart.${RESET}"
+        echo -e "  ${DIM}Pastikan app Termux:Boot sudah terinstall dari F-Droid.${RESET}"
+        ;;
+    help|--help|-h|"") show_help ;;
+    *) echo -e "${RED}✗ Perintah tidak dikenal: $CMD${RESET}"; echo -e "  Ketik ${CYAN}keepalive help${RESET} untuk bantuan." ;;
+esac
+
+# Append: install-boot command handler sudah ada di case CMD
